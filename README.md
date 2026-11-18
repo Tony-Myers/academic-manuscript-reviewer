@@ -56,7 +56,7 @@ not distributed here; actual architecture, chat-template and image support
 depend on your installed model and server versions.
 
 ```bash
-cd /path/to/academic-manuscript-reviewer-release
+cd /path/to/academic-manuscript-reviewer
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 # Optional page rendering for Vision-assisted extraction:
