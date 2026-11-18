@@ -1,0 +1,6 @@
+pdfjs-dist 6.5.438 (Apache-2.0), legacy build, from the npm registry.
+The standard build calls WeakMap.prototype.getOrInsertComputed without a
+fallback (Safari 26.2 or later); the legacy build polyfills it, so it is used
+for Safari on macOS. Scripting (QuickJS) is not bundled and is disabled.
+sha256 of the vendored package tarball:
+7461aefcd27c4ef0dd76f9ca5760f09466eb6b3f934432670c12132e7b3d6faa

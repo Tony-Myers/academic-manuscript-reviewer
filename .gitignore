@@ -1,0 +1,65 @@
+# .gitignore is a convenience, not a confidentiality control: "git add -f",
+# copying files by hand or pushing an existing history bypasses it. Run
+# scripts/release_check.py before publishing.
+
+# Python, editors and operating system
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+node_modules/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local configuration and credentials
+local.env
+local.env.*
+!local.env.example
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# Reviews, manuscripts and anything derived from them (default locations)
+inputs/
+uploads/
+reports/
+reviews/
+sessions/
+local_results/
+experiments/
+benchmarks/
+backups/
+*.pdf
+*.docx
+*.doc
+*.rtf
+*.odt
+*.xlsx
+*.xls
+*.pptx
+
+# Runtime state and logs
+logs/
+run/
+*.log
+
+# Models and large binaries
+*.gguf
+*.safetensors
+*.bin
+*.npz
+
+# Editor and backup leftovers
+*.backup*
+*.bak
+*.save
+*.orig
+*.swp
+*~

@@ -1,0 +1,12 @@
+# Versions used for offline release validation.
+fastapi==0.136.0
+uvicorn==0.44.0
+python-multipart==0.0.26
+pdfplumber==0.11.9
+python-docx==1.2.0
+openpyxl==3.1.5
+pypdf==6.10.2
+# Imported directly by app/academic_claims.py (pinned, validated connections for
+# reference and source checks). It was previously installed only as a
+# dependency of httpx, a test requirement, so a runtime-only install failed.
+httpcore==1.0.9

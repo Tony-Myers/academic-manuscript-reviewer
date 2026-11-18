@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Manuscript viewer</title>
+<style>
+  :root { --bg:#fff; --surface:#f5f5f4; --border:#d6d3d1; --text:#1c1917; --muted:#57534e; --accent:#2563eb; --error:#b91c1c; color-scheme: light dark; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1c1917; --surface:#292524; --border:#44403c; --text:#f5f5f4; --muted:#a8a29e; --accent:#60a5fa; --error:#f87171; } }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font:13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { display:flex; flex-direction:column; }
+  .bar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:6px 8px;
+    border-bottom:1px solid var(--border); background:var(--surface); }
+  .bar select, .bar input, .bar button { font:inherit; color:inherit; background:var(--bg);
+    border:1px solid var(--border); border-radius:5px; padding:3px 7px; }
+  .bar button:disabled { opacity:.45; }
+  .bar input[type=number] { width:4.2em; }
+  #docSelect { max-width:min(320px, 60vw); }
+  .meta { color:var(--muted); font-size:12px; }
+  #identity { padding:3px 8px; border-bottom:1px solid var(--border); }
+  #others { padding:4px 8px; border-bottom:1px solid var(--border); display:none; }
+  #others a { margin-right:10px; }
+  #stage { flex:1; overflow:auto; padding:12px; box-sizing:border-box; text-align:center; outline:none; }
+  .page { position:relative; display:inline-block; margin:0 auto; box-shadow:0 1px 4px rgba(0,0,0,.35); background:#fff; }
+  .page canvas { display:block; }
+  .page { display:block; width:max-content; margin:0 auto 16px; }
+  .textLayer { position:absolute; inset:0; overflow:clip; line-height:1; text-align:initial;
+    -webkit-text-size-adjust:none; text-size-adjust:none; forced-color-adjust:none; }
+  .textLayer :is(span, br) { color:transparent; position:absolute; white-space:pre; transform-origin:0 0; }
+  .textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) {
+    font-size:calc(var(--font-height) * var(--scale-factor) * var(--min-font-size));
+    transform:rotate(var(--rotate, 0deg)) scaleX(var(--scale-x, 1)) scale(calc(1 / var(--min-font-size)));
+  }
+  .textLayer .markedContent { top:0; height:0; }
+  .textLayer[data-main-rotation="90"] { transform:rotate(90deg) translateY(-100%); transform-origin:0 0; }
+  .textLayer[data-main-rotation="180"] { transform:rotate(180deg) translate(-100%, -100%); transform-origin:0 0; }
+  .textLayer[data-main-rotation="270"] { transform:rotate(270deg) translateX(-100%); transform-origin:0 0; }
+  .passage-mark { position:absolute; background:rgba(255,225,0,.5); }
+  #passageStatus { padding:6px 8px; text-align:left; }
+
+  .highlight-layer { position:absolute; inset:0; pointer-events:none; }
+  #message { padding:16px; text-align:left; max-width:560px; margin:0 auto; }
+  #message.error { color:var(--error); }
+  #reattach { margin-top:10px; display:none; }
+</style>
+</head>
+<body>
+<div class="bar" role="toolbar" aria-label="Manuscript viewer">
+  <label class="meta" for="docSelect">Document</label>
+  <select id="docSelect" aria-label="Document"></select>
+  <button id="prevBtn" title="Previous page (←)" aria-label="Previous page">‹</button>
+  <input id="pageInput" type="number" min="1" value="1" aria-label="Page number">
+  <span class="meta" id="pageCount">of –</span>
+  <button id="nextBtn" title="Next page (→)" aria-label="Next page">›</button>
+  <span style="width:8px"></span>
+  <button id="zoomOutBtn" title="Zoom out" aria-label="Zoom out">−</button>
+  <span class="meta" id="zoomLabel" style="min-width:3.5em; text-align:center;">–</span>
+  <button id="zoomInBtn" title="Zoom in" aria-label="Zoom in">+</button>
+  <button id="fitBtn" title="Fit page width">Fit width</button>
+  <button id="clearPassage" type="button" hidden>Clear highlight</button>
+</div>
+<div id="passageStatus" role="status" aria-live="polite" hidden></div>
+<div id="identity" class="meta"></div>
+<div id="others" class="meta"></div>
+<div id="stage" tabindex="0">
+  <div id="message" class="meta">No document selected.</div>
+  <div id="reattach">
+    <p>Attach the original file to this saved review. It is accepted only if its SHA-256 matches the hash recorded for this review; it is stored on this computer with the review.</p>
+    <input type="file" id="reattachInput" accept=".pdf,.docx,.txt,.md,.csv,.xlsx,.xlsm">
+    <div id="reattachResult" class="meta" style="margin-top:6px;"></div>
+  </div>
+  <div id="pageHost"></div>
+</div>
+
+<script src="/review/passage-match.js"></script>
+<script type="module">
+// Local PDF.js only (app/vendor/pdfjs, legacy build for Safari). No network
+// access beyond this server; scripting inside PDFs is not enabled.
+import * as pdfjsLib from '/vendor/pdfjs/pdf.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/pdf.worker.min.mjs';
+
+const JOB_ID = /^[0-9a-f]{12}$/, DOC_ID = /^d\d{1,2}$/;
+const ZOOMS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+const $ = id => document.getElementById(id);
+const state = { job: null, doc: null, page: 1, pages: 0, zoom: 'fit', documents: [], pdf: null, task: null,
+                renderTask: null, scale: 1, loadToken: 0, renderToken: 0, passageToken: 0, activePassage: null, activeTarget: null };
+
+function setMessage(text, error = false) {
+  const m = $('message'); m.textContent = text || ''; m.style.display = text ? '' : 'none';
+  m.className = error ? 'error' : 'meta';
+}
+function docById(id) { return state.documents.find(d => d.id === id) || null; }
+function docLabel(d) {
+  const role = d.role === 'primary' ? 'Primary manuscript' : 'Supplement ' + d.id.slice(1);
+  return role + ': ' + (d.original_filename || d.id);
+}
+function docUrl(d, download) {
+  return '/api/review/' + state.job + '/documents/' + d.id + (download ? '?download=1' : '');
+}
+
+async function loadDocuments(job) {
+  const r = await fetch('/api/review/' + job + '/documents', { cache: 'no-store' });
+  const body = r.ok ? await r.json() : { documents: [], error: 'unavailable' };
+  state.documents = Array.isArray(body.documents) ? body.documents : [];
+  state.saved = !!body.saved;
+  const sel = $('docSelect'); sel.innerHTML = '';
+  for (const d of state.documents) {
+    const o = document.createElement('option');
+    o.value = d.id;
+    o.textContent = docLabel(d) + (d.viewable ? '' : d.available ? ' (not a PDF)' : ' (not stored)');
+    sel.appendChild(o);
+  }
+  const others = state.documents.filter(d => d.available && !d.viewable);
+  const box = $('others');
+  box.innerHTML = '';
+  if (others.length) {
+    box.appendChild(document.createTextNode('Other files: '));
+    for (const d of others) {
+      const a = document.createElement('a');
+      a.href = docUrl(d, true); a.textContent = docLabel(d); a.setAttribute('download', '');
+      box.appendChild(a);
+    }
+  }
+  box.style.display = others.length ? 'block' : 'none';
+}
+
+function updateControls() {
+  $('pageInput').value = state.page; $('pageInput').max = state.pages || 1;
+  $('pageCount').textContent = 'of ' + (state.pages || '–');
+  $('prevBtn').disabled = !state.pdf || state.page <= 1;
+  $('nextBtn').disabled = !state.pdf || state.page >= state.pages;
+  for (const id of ['zoomOutBtn', 'zoomInBtn', 'fitBtn', 'pageInput']) $(id).disabled = !state.pdf;
+  $('zoomLabel').textContent = state.pdf ? Math.round(state.scale * 100) + '%' : '–';
+  if (state.doc) $('docSelect').value = state.doc;
+}
+
+function writeHash() {
+  if (!state.job) return;
+  const h = '#job=' + state.job + (state.doc ? '&doc=' + state.doc : '') + '&page=' + state.page
+    + '&zoom=' + (state.zoom === 'fit' ? 'fit' : state.zoom);
+  if (window.location.hash !== h) history.replaceState(null, '', h);
+  try {
+    if (window.parent !== window) window.parent.postMessage({ type: 'review-viewer:state', job: state.job,
+      doc: state.doc, page: state.page, pages: state.pages }, window.location.origin);
+  } catch (e) {}
+}
+
+function showReattach(d) {
+  $('reattach').style.display = state.saved && d && !d.available ? 'block' : 'none';
+  $('reattachResult').textContent = '';
+}
+
+function passageStatus(text) {
+  $('passageStatus').textContent = text;
+  $('passageStatus').hidden = !text;
+  $('clearPassage').hidden = !state.activePassage;
+}
+// The viewer is the one authority on which quotation is highlighted. Every
+// change is announced to the embedding page (or opener), which only mirrors it.
+function passageKey(t) {
+  return t ? [t.job, t.doc, t.sha256, t.page == null ? '' : String(t.page), t.quote].join('\u0000') : null;
+}
+function announcePassage() {
+  const msg = { type: 'review-viewer:passage-state', job: state.job, active: passageKey(state.activeTarget) };
+  for (const w of [window.parent !== window ? window.parent : null, window.opener]) {
+    if (w) { try { w.postMessage(msg, window.location.origin); } catch (e) {} }
+  }
+}
+function clearPassage() {
+  state.passageToken++; state.renderToken++; state.activePassage = null; state.activeTarget = null;
+  passageStatus('');
+  document.querySelectorAll('.passage-mark').forEach(n => n.remove());
+  announcePassage();
+}
+function passageFailure(match) {
+  // Every target reaching the viewer was located verbatim in the extracted
+  // manuscript text by the application (Evidence Cards, Ask answers).
+  if (match.status === 'not_found') return 'Passage located in extracted manuscript text, but an exact match '
+    + 'could not be established in the displayed PDF, so it is not highlighted.';
+  if (match.status === 'ambiguous') return 'Passage located in extracted manuscript text, but it occurs '
+    + (match.count || 'several') + ' times in the displayed PDF, so it cannot be highlighted unambiguously.';
+  return 'No highlight: ' + (match.reason || match.status.replaceAll('_', ' ')) ;
+}
+
+// Bind matcher offsets to the *actual* rendered PDF.js text nodes. No resync,
+// substring search or approximation: every character must agree before drawing.
+function passageRects(container, items, range) {
+  const nodes = [], walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  let n; while ((n = walker.nextNode())) if (n.data.length) nodes.push(n);
+  const strings = items.map(i => typeof i.str === 'string' ? i.str : '');
+  if (nodes.map(n => n.data).join('') !== strings.join('')) throw new Error('PDF text-layer alignment unavailable');
+  function offset(p) {
+    if (!p || !Number.isInteger(p.item) || p.item < 0 || p.item >= items.length
+        || !Number.isInteger(p.off) || p.off < 0 || p.off > strings[p.item].length) throw new Error('Invalid text offset');
+    return strings.slice(0, p.item).reduce((a, s) => a + s.length, 0) + p.off;
+  }
+  function endpoint(off, end) {
+    let total = 0;
+    for (const n of nodes) {
+      if (off < total + n.length || (end && off === total + n.length)) return [n, off - total];
+      total += n.length;
+    }
+    throw new Error('PDF text-layer boundary unavailable');
+  }
+  const start = offset(range.first), end = offset(range.last);
+  if (end <= start) throw new Error('Empty passage range');
+  const r = document.createRange(); r.setStart(...endpoint(start, false)); r.setEnd(...endpoint(end, true));
+  return Array.from(r.getClientRects()).filter(r => r.width > 0 && r.height > 0);
+}
+
+async function renderPage() {
+  const token = state.loadToken, render = ++state.renderToken;
+  const pdf = state.pdf, active = state.activePassage;
+  if (!pdf) return;
+  if (state.renderTask) { try { state.renderTask.cancel(); } catch (e) {} }
+  const current = () => token === state.loadToken && render === state.renderToken && pdf === state.pdf;
+  const numbers = active ? active.ranges.map(r => r.page) : [state.page];
+  const wraps = [];
+  for (const number of numbers) {
+    const page = await pdf.getPage(number);
+    if (!current()) return;
+    const base = page.getViewport({ scale: 1 });
+    const avail = Math.max(200, $('stage').clientWidth - 32);
+    state.scale = state.zoom === 'fit' ? avail / base.width : state.zoom;
+    const viewport = page.getViewport({ scale: state.scale });
+    const ratio = window.devicePixelRatio || 1;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.floor(viewport.width * ratio); canvas.height = Math.floor(viewport.height * ratio);
+    canvas.style.width = viewport.width + 'px'; canvas.style.height = viewport.height + 'px';
+    const task = page.render({ canvasContext: canvas.getContext('2d'), viewport,
+      transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : null });
+    state.renderTask = task;
+    try { await task.promise; } catch (e) { if (!current() || e?.name === 'RenderingCancelledException') return; throw e; }
+    if (!current()) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'page'; wrap.dataset.doc = state.doc; wrap.dataset.page = String(number);
+    wrap.style.setProperty('--scale-factor', String(state.scale * (page.userUnit || 1))); wrap.appendChild(canvas);
+    const text = document.createElement('div'); text.className = 'textLayer'; wrap.appendChild(text);
+    const content = await page.getTextContent();
+    try {
+      const layer = new pdfjsLib.TextLayer({ textContentSource: content, container: text, viewport });
+      // Explicit dimensions avoid depending on PDF.js viewer-wide CSS variables.
+      text.style.width = (viewport.rawDims ? viewport.rawDims.pageWidth * state.scale * (page.userUnit || 1) : viewport.width) + 'px';
+      text.style.height = (viewport.rawDims ? viewport.rawDims.pageHeight * state.scale * (page.userUnit || 1) : viewport.height) + 'px';
+      await layer.render();
+    } catch (e) {
+      // An unavailable text layer must not hide the original page image.
+      // Emptying it also makes any attempted highlight fail closed below.
+      text.replaceChildren();
+    }
+    if (!current()) return;
+    wrap._content = content; wrap._text = text;
+    const overlay = document.createElement('div'); overlay.className = 'highlight-layer'; wrap.appendChild(overlay);
+    wraps.push(wrap);
+  }
+  if (!current()) return;
+  $('pageHost').replaceChildren(...wraps);
+  try {
+    if (active) {
+      // Measure only attached, fully rendered layers; draw nothing unless *all*
+      // constituent ranges can be positioned (including page-break passages).
+      const positioned = wraps.map((wrap, i) => ({ wrap,
+        rects: passageRects(wrap._text, wrap._content.items, active.ranges[i]) }));
+      if (positioned.some(p => !p.rects.length)) throw new Error('Passage geometry unavailable');
+      for (const {wrap, rects} of positioned) {
+        const bounds = wrap.getBoundingClientRect();
+        for (const rect of rects) {
+          const mark = document.createElement('div'); mark.className = 'passage-mark';
+          Object.assign(mark.style, { left: (rect.left - bounds.left) + 'px', top: (rect.top - bounds.top) + 'px',
+            width: rect.width + 'px', height: rect.height + 'px' });
+          wrap.querySelector('.highlight-layer').appendChild(mark);
+        }
+      }
+      passageStatus('Exact passage located in PDF. This locates text; it does not verify the interpretation.');
+      wraps[0].querySelector('.passage-mark').scrollIntoView({ block: 'center', behavior: 'instant' });
+    }
+  } catch (e) {
+    document.querySelectorAll('.passage-mark').forEach(n => n.remove());
+    passageStatus('No highlight: ' + e.message + '.');
+    updateControls(); writeHash(); return false;
+  }
+  updateControls(); writeHash(); return true;
+}
+
+async function showPassage(target) {
+  // A new quotation replaces the highlight only once it has been located and
+  // drawn; until then, and on any failure, the previous highlight is kept.
+  if (target && target.job !== state.job) clearPassage();
+  const request = ++state.passageToken;
+  const stale = () => request !== state.passageToken;
+  const fail = text => {
+    if (!stale()) {
+      passageStatus(text + (state.activePassage ? ' The previous highlight is unchanged.' : ''));
+      announcePassage();
+    }
+    return false;
+  };
+  if (!target || !JOB_ID.test(target.job || '') || !DOC_ID.test(target.doc || '')
+      || !/^[0-9a-f]{64}$/.test(target.sha256 || '') || typeof target.quote !== 'string' || !target.quote.trim()) {
+    return fail('No highlight: an explicit source identity and quotation are required.');
+  }
+  if (target.job !== state.job) { state.job = target.job; state.doc = null; await loadDocuments(target.job); }
+  if (stale()) return false;
+  const d = docById(target.doc);
+  if (!d || d.sha256 !== target.sha256 || !d.available || !d.viewable) {
+    return fail('No highlight: original PDF identity could not be established.');
+  }
+  passageStatus('Locating exact passage…');
+  let pdf = state.pdf, task = null, match;
+  try {
+    if (target.doc !== state.doc || !pdf) {
+      // Match in a separate copy so a failure leaves the displayed document alone.
+      // The server performs the saved-file SHA-256 check on this request too.
+      task = pdfjsLib.getDocument({ url: docUrl(d, false), withCredentials: false, isEvalSupported: false,
+        enableXfa: false, cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true,
+        standardFontDataUrl: '/vendor/pdfjs/standard_fonts/', wasmUrl: '/vendor/pdfjs/wasm/', iccUrl: '/vendor/pdfjs/iccs/' });
+      pdf = await task.promise;
+    }
+    const pages = [];
+    for (let page = 1; page <= pdf.numPages; page++) {
+      pages.push({page, items: (await (await pdf.getPage(page)).getTextContent()).items});
+      if (stale()) return false;
+    }
+    match = window.locatePassage(pages, target.quote, target.page || null);
+  } catch (e) {
+    return fail('No highlight: PDF text could not be matched.');
+  } finally {
+    if (task) { try { task.destroy(); } catch (e) {} }
+  }
+  if (stale()) return false;
+  if (match.status !== 'exact') return fail(passageFailure(match));
+  const prev = { match: state.activePassage, target: state.activeTarget, doc: state.doc, page: state.page };
+  if (target.doc !== state.doc || !state.pdf) {
+    state.activePassage = null; state.activeTarget = null;
+    if (!await open({job: target.job, doc: target.doc}, true) || !state.pdf) {
+      if (!stale()) await restorePassage(prev, 'No highlight: the PDF could not be displayed.');
+      return false;
+    }
+    if (stale()) return false;
+  }
+  state.activePassage = match; state.activeTarget = target; state.page = match.page;
+  if (await renderPage() === true) { if (!stale()) announcePassage(); return !stale(); }
+  if (!stale()) await restorePassage(prev, $('passageStatus').textContent || 'No highlight: passage geometry unavailable.');
+  return false;
+}
+
+// Put back the highlight that was active before a failed attempt.
+async function restorePassage(prev, message) {
+  state.activePassage = prev.match; state.activeTarget = prev.target;
+  if (prev.match) {
+    if (prev.doc !== state.doc) await open({ job: state.job, doc: prev.doc }, true);
+    else { state.page = prev.match.page; await renderPage(); }
+  } else {
+    state.page = prev.doc === state.doc ? prev.page : state.page;
+    await renderPage();
+  }
+  passageStatus(message + (prev.match ? ' The previous highlight is unchanged.' : ''));
+  announcePassage();
+}
+
+async function openPdf(d, page) {
+  const token = ++state.loadToken;
+  if (state.task) { try { state.task.destroy(); } catch (e) {} }
+  state.pdf = null; state.pages = 0; $('pageHost').replaceChildren(); updateControls();
+  setMessage('Loading ' + docLabel(d) + '…');
+  const task = pdfjsLib.getDocument({
+    url: docUrl(d, false), withCredentials: false, isEvalSupported: false, enableXfa: false,
+    cMapUrl: '/vendor/pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: '/vendor/pdfjs/standard_fonts/',
+    wasmUrl: '/vendor/pdfjs/wasm/', iccUrl: '/vendor/pdfjs/iccs/',
+  });
+  state.task = task;
+  try {
+    const pdf = await task.promise;
+    if (token !== state.loadToken) return;
+    state.pdf = pdf; state.pages = pdf.numPages;
+    state.page = Math.min(Math.max(1, page || 1), pdf.numPages);
+    setMessage('');
+    await renderPage();
+  } catch (e) {
+    if (token !== state.loadToken) return;
+    setMessage('This PDF could not be displayed (' + (e && e.message ? e.message : 'error') + '). '
+      + 'The stored file is unchanged.', true);
+  }
+}
+
+// The viewer's one navigation entry point. A page number is meaningful only
+// together with the document it belongs to, so a page without a document id
+// is refused rather than applied to the primary manuscript.
+async function open(target = {}, keepPassage = false) {
+  if (!keepPassage) clearPassage();
+  const job = target.job || state.job;
+  if (!JOB_ID.test(job || '')) { setMessage('No saved review selected.'); return false; }
+  if (target.page != null && !target.doc) {
+    setMessage('A page reference must name its source document; nothing was opened.', true); return false;
+  }
+  if (target.doc != null && !DOC_ID.test(target.doc)) { setMessage('Unknown document.', true); return false; }
+  if (job !== state.job) { state.job = job; state.doc = null; await loadDocuments(job); }
+  if (target.zoom != null) state.zoom = target.zoom === 'fit' ? 'fit' : Math.min(4, Math.max(0.25, Number(target.zoom) || 1));
+  let d = target.doc ? docById(target.doc) : (docById(state.doc) || state.documents.find(x => x.role === 'primary'));
+  if (target.doc && !d) { setMessage('This review has no document ' + target.doc + '.', true); return false; }
+  if (!d) {
+    $('identity').textContent = '';
+    setMessage(state.saved ? 'No original documents are recorded for this review.'
+      : 'Original documents are kept only with saved reviews.');
+    showReattach(null); return false;
+  }
+  const changed = d.id !== state.doc || !state.pdf;
+  state.doc = d.id;
+  $('identity').textContent = docLabel(d) + (d.sha256 ? ' · SHA-256 ' + d.sha256.slice(0, 12) + '…'
+    + (d.available ? ' (checked against the saved review on each load)' : '') : '');
+  showReattach(d);
+  if (!d.available) {
+    if (state.task) { try { state.task.destroy(); } catch (e) {} }
+    state.loadToken++; state.pdf = null; state.pages = 0; $('pageHost').replaceChildren(); updateControls();
+    setMessage('The original ' + (d.role === 'primary' ? 'manuscript' : 'supplement')
+      + ' is not stored with this review. It was saved before original documents were kept.');
+    writeHash(); return false;
+  }
+  if (!d.viewable) {
+    state.loadToken++; state.pdf = null; state.pages = 0; $('pageHost').replaceChildren(); updateControls();
+    setMessage('This document is not a PDF and cannot be shown here. Use the download link above to open it locally.');
+    writeHash(); return false;
+  }
+  if (changed) await openPdf(d, target.page);
+  else { state.page = Math.min(Math.max(1, target.page || state.page), state.pages); await renderPage(); }
+  return true;
+}
+
+function goToPage(n) { clearPassage(); if (state.pdf) return open({ doc: state.doc, page: Number(n) || 1 }); }
+function setZoom(z) { state.zoom = z; return renderPage(); }
+function stepZoom(dir) {
+  const cur = state.scale;
+  const next = dir > 0 ? ZOOMS.find(z => z > cur + 0.001) : [...ZOOMS].reverse().find(z => z < cur - 0.001);
+  if (next) setZoom(next);
+}
+function parseHash() {
+  const p = new URLSearchParams(window.location.hash.slice(1));
+  const t = { job: p.get('job') };
+  if (p.get('doc')) t.doc = p.get('doc');
+  if (p.get('page')) t.page = Number(p.get('page'));
+  if (p.get('zoom')) t.zoom = p.get('zoom');
+  return t;
+}
+
+let initialReady = Promise.resolve();
+window.reviewDocumentViewer = {
+  open, showPassage: target => initialReady.then(() => showPassage(target)), clearPassage, goToPage, setZoom, reload: async () => { const j = state.job; state.job = null; return open({ job: j, doc: state.doc, page: state.page }); },
+  current: () => ({ job: state.job, doc: state.doc, page: state.page, pages: state.pages, zoom: state.zoom }),
+};
+
+$('docSelect').addEventListener('change', e => { clearPassage(); open({ doc: e.target.value, page: 1 }); });
+$('clearPassage').addEventListener('click', () => { clearPassage(); renderPage(); });
+$('prevBtn').addEventListener('click', () => goToPage(state.page - 1));
+$('nextBtn').addEventListener('click', () => goToPage(state.page + 1));
+$('pageInput').addEventListener('change', e => goToPage(e.target.value));
+$('zoomInBtn').addEventListener('click', () => stepZoom(1));
+$('zoomOutBtn').addEventListener('click', () => stepZoom(-1));
+$('fitBtn').addEventListener('click', () => setZoom('fit'));
+$('stage').addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'ArrowRight' || e.key === 'PageDown') { goToPage(state.page + 1); e.preventDefault(); }
+  if (e.key === 'ArrowLeft' || e.key === 'PageUp') { goToPage(state.page - 1); e.preventDefault(); }
+});
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  if (state.zoom !== 'fit') return;
+  clearTimeout(resizeTimer); resizeTimer = setTimeout(renderPage, 150);
+});
+window.addEventListener('hashchange', () => open(parseHash()));
+window.addEventListener('message', e => {
+  if (e.origin !== window.location.origin || (e.source !== window.parent && e.source !== window.opener) || !e.data) return;
+  if (e.data.type === 'review-viewer:passage') showPassage(e.data.target);
+  if (e.data.type === 'review-viewer:clear-passage') { if (state.activePassage) { clearPassage(); renderPage(); } else announcePassage(); }
+  if (e.data.type === 'review-viewer:passage-query') announcePassage();
+  if (e.data.type === 'review-viewer:open') { clearPassage(); open({ job: e.data.job, doc: e.data.doc, page: e.data.page }); }
+});
+$('reattachInput').addEventListener('change', async e => {
+  const file = e.target.files && e.target.files[0];
+  if (!file || !state.job) return;
+  const out = $('reattachResult');
+  out.textContent = 'Checking ' + file.name + '…';
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const r = await fetch('/api/review/' + state.job + '/documents/reattach', { method: 'POST', body: fd });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) { out.textContent = body.error || 'The file was not attached.'; out.style.color = 'var(--error)'; return; }
+    out.style.color = ''; out.textContent = 'Attached: the file matches the recorded SHA-256.';
+    const job = state.job; state.job = null;
+    await open({ job, doc: body.id });
+  } catch (err) { out.textContent = 'The file was not attached.'; }
+  finally { e.target.value = ''; }
+});
+
+updateControls();
+initialReady = open(parseHash()).then(() => {
+  if (window.opener) window.opener.postMessage({type:'review-viewer:ready'}, location.origin);
+  announcePassage();
+});
+</script>
+</body>
