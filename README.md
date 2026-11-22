@@ -37,6 +37,31 @@ particular review.
 - Development mode retaining additional local trace information for inspection.
 - Academic Chat, with structured drafts, methodological guidance and optional reference/source checks.
 
+## v0.1.1 release-candidate maintenance behaviour
+
+Non-Thinking chunk review starts with 1,800 output tokens. Thinking retains
+its existing 900-token answer allowance plus the configured Thinking reserve.
+The same truncation recovery, other stage limits and sampling settings apply.
+Restart the application to pick up the new source default; no model reload
+is required for this change.
+
+Quotation authentication uses conservative token-preserving matching across
+appraisal labels, cards and verification. It establishes wording/location,
+not whether a methodological interpretation is correct. Numbered findings
+are recognised without rewriting their text.
+
+The manuscript-review API checks the expected checkpoint against server
+metadata before inference and checks each guarded request/response. Missing,
+ambiguous or inconsistent identity stops the review. Use a server that reports
+its full checkpoint path consistently. Existing direct-backend/CLI behaviour
+and model preference persistence are unchanged. Filename-only identities cannot
+confirm a full checkpoint path or revision; servers with missing/conflicting
+metadata and ambiguous multi-model routers are refused rather than assumed
+compatible. Identity checks use `/props` and `/v1/models`; a successful metadata
+match is not full live-inference or cross-platform validation. Those validations
+remain outstanding for this maintenance candidate. See [release notes](RELEASE_NOTES.md)
+for scope and compatibility limits. No accuracy advantage has been established.
+
 ## Requirements and installation
 
 - Python 3.10 or newer (the test suite has been run with 3.10 and 3.13).

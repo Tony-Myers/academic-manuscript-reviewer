@@ -1,6 +1,41 @@
 # Release notes
 
-## 0.1.0 — first public source release (proposed; not yet published)
+## 0.1.1 — maintenance release candidate (not released)
+
+- Start non-Thinking chunk review at 1,800 tokens instead of 900. Preserve
+  the existing recovery mechanism and Thinking-mode token settings.
+- Use the existing conservative quotation matcher consistently in appraisal
+  labels, Evidence Cards and source verification. Changed numbers, signs,
+  operators and omitted table cells do not authenticate as exact quotations.
+- Recognise numbered strengths, concerns and verification questions while
+  preserving their original text and source positions.
+- Check the expected versus served checkpoint before and during API review
+  execution. Missing, ambiguous or inconsistent identity stops the review;
+  optional Vision or verification handling cannot silently bypass a failure.
+
+Quotation authentication establishes wording and location, not evidential
+support or methodological correctness. Existing saved reviews and reviewer
+choices are not migrated. The original model verdict remains in provenance.
+No experimental synthesis/statistics features or new runtime dependencies
+are included. Model choices, sampling and launch settings remain unchanged.
+
+Compatibility: checkpoint identity must be reported consistently by the local
+server. Matching a filename alone does not confirm a full checkpoint path or
+revision. Managed reviews use the currently configured/browser-loaded target;
+external reviews pin the reported checkpoint when the review is created. This
+update does not add persistent model preferences across restarts or support
+ambiguous multi-model routers. The guard applies to the manuscript-review API
+worker and its requests; it is not a general authentication layer for direct
+backend calls or the standalone CLI.
+
+The token allowance change is an operational change, not a demonstrated
+methodological-accuracy improvement. Full live-model inference and cross-platform
+validation have not been performed. A successful read-only checkpoint-identity
+check is a prerequisite for the maintenance commit; it does not establish
+live inference, Vision or methodological compatibility. Publication remains
+pending approval.
+
+## 0.1.0 — first public source release
 
 A local research tool that helps a human reviewer appraise an academic
 manuscript with a locally hosted language model. Every finding it produces is

@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'app'))
 sys.path.insert(0, str(ROOT / 'tests'))
 import fixtures as fx  # noqa: E402
+import evidence_cards as ec  # noqa: E402
 import review_store as store  # noqa: E402
 import server  # noqa: E402
 import source_verification as sv  # noqa: E402
@@ -95,10 +96,13 @@ class HistoricalReviews(Isolated):
         self.assertTrue(current['original_available'])
         for heading in ('## C1 — Concern', '## C2 — Concern', '## Q1 — Verification question'):
             self.assertIn(heading, md)
-        # The fixture's five-word quotation occurs once: authenticated here, and the
-        # difference from the Evidence Card (which needs six words) is stated, not hidden.
+        # Unique short text is authenticated by the same matcher in both views.
         self.assertIn('**Exact quotation authenticated** (verbatim manuscript text', md)
-        self.assertIn('The Evidence Card does not list this quotation as located (too short', md)
+        self.assertNotIn('The Evidence Card does not list this quotation as located', md)
+        current_cards = ec.build_cards(fx.verified(), fx.SOURCES)
+        c2 = next(c for c in current_cards['cards'] if c['label'] == 'C2')
+        self.assertTrue(any(p['status'] == 'located' and p['text'].rstrip('.') == fx.REPEATS.rstrip('.') for p in c2['evidence']))
+        self.assertIn("not that the AI's reading of it is correct", md)
         self.assertIn('> Every tile was scanned twice.', md)
         self.assertIn('The AI verifier disputed this finding', md)  # C2 in the fixture
         self.assertEqual(original['presentation'], 'original')

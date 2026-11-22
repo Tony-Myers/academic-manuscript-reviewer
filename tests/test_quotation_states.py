@@ -249,11 +249,16 @@ class Provenance(unittest.TestCase):
                           intermediate=[('the AI file summary for fictional-trial.pdf', 'Notes: ' + self.QUOTE)])
         self.assertIn('It appears verbatim in the AI file summary for fictional-trial.pdf', entry(found, 'C1'))
 
-    def test_card_check_that_is_less_strict_is_explained(self):
+    def test_card_and_appendix_both_reject_an_altered_sign(self):
         quote = 'Mean change in the experimental group was 0.5 points'
         md, cards, *_ = build([('The change is positive.', quote)])
-        self.assertTrue(any(p['status'] == 'located' for c in cards['cards'] for p in c['evidence']))
-        self.assertIn('The Evidence Card lists this quotation as located', entry(md, 'C1'))
+        self.assertFalse(any(p['status'] == 'located' for c in cards['cards'] for p in c['evidence']))
+        self.assertNotIn('The Evidence Card lists this quotation as located', entry(md, 'C1'))
+        exact_quote = 'Mean change in the experimental group was -0.5 points'
+        exact_md, exact_cards, *_ = build([('The change is positive.', exact_quote)])
+        self.assertTrue(any(p['status'] == 'located' for c in exact_cards['cards'] for p in c['evidence']))
+        self.assertIn(EXACT, entry(exact_md, 'C1'))
+        self.assertNotIn('does not list this quotation as located', entry(exact_md, 'C1'))
         self.assertIn(MISSING, entry(md, 'C1'))
 
 

@@ -23,8 +23,8 @@ _HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$")
 # only "- Concern:" exactly, so a final appraisal written with "**Concern:**",
 # a bold heading or a heading with a suffix had cards for its concerns while
 # the appendix reported that none had been identified.
-_CONCERN_RE = re.compile(r"^\s*[-*]?\s*\**\s*Concern:?\**\s*:?\s*(.+)$", re.IGNORECASE)
-_CHECK_RE = re.compile(r"^\s*[-*]?\s*\**\s*Check:?\**\s*:?\s*(.+)$", re.IGNORECASE)
+_CONCERN_RE = re.compile(r"^\s*(?:\**\d{1,2}[.)]\**\s+)?[-*]?\s*\**\s*Concern:?\**\s*:?\s*(.+)$", re.IGNORECASE)
+_CHECK_RE = re.compile(r"^\s*(?:\**\d{1,2}[.)]\**\s+)?[-*]?\s*\**\s*Check:?\**\s*:?\s*(.+)$", re.IGNORECASE)
 _APPENDIX_SECTIONS = ("directly supported concerns", "verification prompts")
 
 # Field labels may be bold ("**Reason:**", "**Reason**:") as well as plain.

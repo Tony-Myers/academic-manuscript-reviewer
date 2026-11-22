@@ -90,6 +90,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import model_identity as mi
+
 __all__ = [
     "load",
     "generate",
@@ -136,6 +138,40 @@ _FORCED_BACKEND: Optional[str] = None
 
 # Backend actually used by the most recent load(), for reporting.
 _ACTIVE_BACKEND: Optional[str] = None
+
+_IDENTITY_GUARD: Optional["mi.IdentityGuard"] = None
+_IDENTITY_GUARD_LOCK = threading.Lock()
+_IDENTITY_SCOPE_LOCK = threading.RLock()
+
+
+@contextmanager
+def identity_guard(guard: Optional["mi.IdentityGuard"]):
+    """Check every inference request made inside the block against ``guard``."""
+    global _IDENTITY_GUARD
+    # The process-wide guard must have one review owner for its entire scope,
+    # not merely while assigning the pointer. Concurrent review workers wait
+    # here; each still probes identity before its own inference requests.
+    with _IDENTITY_SCOPE_LOCK:
+        with _IDENTITY_GUARD_LOCK:
+            previous, _IDENTITY_GUARD = _IDENTITY_GUARD, guard
+        try:
+            yield guard
+        finally:
+            with _IDENTITY_GUARD_LOCK:
+                _IDENTITY_GUARD = previous
+
+
+def active_identity_guard() -> Optional["mi.IdentityGuard"]:
+    return _IDENTITY_GUARD
+
+
+def raise_if_identity_compromised() -> None:
+    """Raise if the active guard has stopped the review, even when a caller
+    swallowed the original ModelIdentityError."""
+    guard = _IDENTITY_GUARD
+    if guard is not None and guard.tripped is not None:
+        raise mi.ModelIdentityError(guard.tripped["message"], guard.tripped["code"], dict(guard.tripped))
+
 
 
 class BackendError(RuntimeError):
@@ -882,6 +918,16 @@ class LlamaServerModel:
     # -- plumbing ----------------------------------------------------------
 
     def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        # Stage 3D (A1): inference requests made during a review are refused
+        # before they are sent once the identity check has failed, and every
+        # response is checked against the review's expected model.
+        guard = _IDENTITY_GUARD if path == "/v1/chat/completions" else None
+        if guard is not None:
+            if self.base_url.rstrip("/") != guard.base_url.rstrip("/"):
+                raise guard._trip(mi.CODE_UNVERIFIED,
+                                  "Inference refused: request endpoint differs from the identity-checked server.",
+                                  checked_server=guard.base_url, request_server=self.base_url)
+            guard.before_request()
         url = f"{self.base_url}{path}"
         data = json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
@@ -892,7 +938,7 @@ class LlamaServerModel:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 raw_response = response.read()
                 ea.request_finished(audit_ticket, raw_response)
-                return json.loads(raw_response.decode("utf-8"))
+                parsed = json.loads(raw_response.decode("utf-8"))
         except urllib.error.HTTPError as exc:
             raw_error = exc.read()
             ea.request_finished(audit_ticket, raw_error, error=f"HTTP {exc.code}")
@@ -921,6 +967,11 @@ class LlamaServerModel:
         except Exception as exc:
             ea.request_finished(audit_ticket, error=f"Response/transport incomplete: {type(exc).__name__}: {exc}")
             raise
+        # Outside the try: the response receipt is already complete, and an
+        # identity failure must not be recorded as a transport failure.
+        if guard is not None:
+            guard.after_response(parsed, payload.get("model"))
+        return parsed
 
     def probe(self, timeout: float = 3.0) -> str:
         """
@@ -1404,6 +1455,8 @@ def describe_image_result(png: bytes, prompt: str, max_tokens: int = 4000) -> Im
     }
     try:
         response = model._post_json("/v1/chat/completions", payload)
+    except mi.ModelIdentityError:
+        raise
     except urllib.error.HTTPError as exc:
         return _record_image_outcome(ImageResult("failed", reason=f"server returned HTTP {exc.code}"))
     except BackendError as exc:

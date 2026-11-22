@@ -112,43 +112,26 @@ def _fold_with_map(text: str, keep_punct: bool) -> Tuple[str, List[int]]:
 
 
 def locate_span(quote: str, source_text: str) -> Optional[Tuple[int, int]]:
-    """Exact raw offsets of a contiguous quotation in the source, or None.
-
-    Accepts only what source_verification._located accepts (no ellipses or
-    bracketed insertions), and folds only formatting differences."""
-    quote = (quote or "").strip().strip('"“”«»').strip()
-    if not quote or sv._NON_CONTIGUOUS.search(quote):
-        return None
-    for keep in (True, False):
-        hay, idx = _fold_with_map(source_text, keep)
-        needle, _ = _fold_with_map(quote, keep)
-        needle = needle.strip()
-        if not needle:
-            continue
-        pos = hay.find(needle)
-        if pos >= 0:
-            return idx[pos], idx[pos + len(needle) - 1] + 1
+    import quote_match as qm
+    result = qm.classify(quote, qm.Manuscript({"source": source_text}))
+    if result.state == qm.EXACT and result.locations:
+        loc = result.locations[0]
+        return loc.start, loc.end
     return None
 
 
 def _passage(quote: str, sources: Dict[str, str]) -> dict:
-    """Authenticated passage with exact location, or an unverified quotation."""
-    if len(quote.split()) >= sv.MIN_QUOTE_WORDS and sv._located(quote, sources):
-        for name, body in sources.items():
-            span = locate_span(quote, body)
-            if span:
-                start, end = span
-                location, in_table = hea._source_span_location(
-                    body, source_start_char=start, source_end_char=end)
-                return dict(status="located", source=name, text=body[start:end],
-                            location=location, in_table=in_table, start=start, end=end, note="")
-        return dict(status="located", source=None, text=quote, location=None, in_table=False,
-                    start=None, end=None,
-                    note="matched only after removing spaces; position not available")
-    reason = ("too short to locate reliably" if len(quote.split()) < sv.MIN_QUOTE_WORDS
-              else "not found in the manuscript as one contiguous passage")
-    return dict(status="unverified", source=None, text=quote, location=None, in_table=False,
-                start=None, end=None, note=reason)
+    """Only exact token-preserving matches are authenticated; related is not exact."""
+    import quote_match as qm
+    result = qm.classify(quote, qm.Manuscript(sources))
+    if result.state == qm.EXACT and result.locations:
+        loc = result.locations[0]
+        return dict(status="located", authentication=result.state, source=loc.source,
+                    text=loc.text, location=loc.location, in_table=loc.in_table,
+                    start=loc.start, end=loc.end, note=result.reason)
+    return dict(status="unverified", authentication=result.state, source=None, text=quote,
+                location=None, in_table=False, start=None, end=None,
+                note=result.reason)
 
 
 def passage(quote: str, sources: Dict[str, str], origin: str) -> dict:
@@ -429,8 +412,7 @@ def _reason_parts(reason: str) -> Dict[str, str]:
 
 def _item_quotes(text: str) -> List[str]:
     """Quotations the original item offers as its own evidence."""
-    quotes = [q.strip() for q in rp._quoted_spans(text or "")]
-    return [q for q in dict.fromkeys(quotes) if len(q.split()) >= 4]
+    return rp.authenticatable_quotes(text)
 
 
 def _dimensions(d: dict, passages: List[dict], scope: str) -> dict:
@@ -497,6 +479,9 @@ def _dimensions(d: dict, passages: List[dict], scope: str) -> dict:
 
 def build_card(d: dict, sources: Dict[str, str], scope: str = "complete",
                titles: Optional[Dict[str, str]] = None) -> dict:
+    model_quote_located = d.get("quote_located")
+    d = dict(d)
+    d["quote_located"] = bool(sv._located(d.get("quote") or "", sources))
     original = d.get("original", "")
     kind = d.get("kind", "")
     verdict = d.get("verdict") or ""
@@ -588,7 +573,7 @@ def build_card(d: dict, sources: Dict[str, str], scope: str = "complete",
             "model_reason": d.get("reason", ""),
             "model_reason_parts": parts or None,
             "model_quote": (d.get("quote") or "").strip(),
-            "model_quote_located": d.get("quote_located"),
+            "model_quote_located": model_quote_located,
             "model_correction": d.get("correction", ""),
             "model_surviving_point": d.get("surviving_point", ""),
             "model_duplicate_of": d.get("duplicate_of", ""),

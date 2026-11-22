@@ -165,7 +165,9 @@ def model_display_name(name: str = None) -> str:
     return Path(name).name if name.lower().endswith(".gguf") else name
 
 MAX_SECTION_CHARS = 7000
-SECTION_MAX_TOKENS = 900
+SECTION_MAX_TOKENS = 1800
+# Preserve the existing Thinking-mode answer allowance.
+THINKING_SECTION_MAX_TOKENS = 900
 FILE_SYNTHESIS_MAX_TOKENS = 1200
 # Raised from 1600 when strengths gained an Evidence line. Confidence and the
 # item table are computed after generation and cost nothing here.
@@ -5639,7 +5641,8 @@ Material:
     sampler = make_default_sampler()
     out = generate(
         model, tokenizer, prompt=prompt,
-        max_tokens=SECTION_MAX_TOKENS, sampler=sampler, verbose=False,
+        max_tokens=(THINKING_SECTION_MAX_TOKENS if thinking_enabled() else SECTION_MAX_TOKENS),
+        sampler=sampler, verbose=False,
         recover_truncation=True,
     )
     return clean_model_output(out)
@@ -10128,10 +10131,10 @@ def sample_size_warning(text: str, table_blocks: List[Tuple[int, str]]) -> str:
     )
 
 
-_CONCERN_RE = re.compile(r"^\s*[-*]?\s*\**\s*Concern:?\**\s*:?\s*(.+)$", re.I)
+_CONCERN_RE = re.compile(r"^\s*(?:\**\d{1,2}[.)]\**\s+)?[-*]?\s*\**\s*Concern:?\**\s*:?\s*(.+)$", re.I)
 _SEVERITY_RE = re.compile(r"^\s*[-*]?\s*\**\s*Severity:?\**\s*:?\s*(\w+)", re.I)
 _EVIDENCE_RE = re.compile(r"^\s*[-*]?\s*\**\s*Evidence:?\**\s*:?\s*(.+)$", re.I)
-_CHECK_RE = re.compile(r"^\s*[-*]?\s*\**\s*Check:?\**\s*:?\s*(.+)$", re.I)
+_CHECK_RE = re.compile(r"^\s*(?:\**\d{1,2}[.)]\**\s+)?[-*]?\s*\**\s*Check:?\**\s*:?\s*(.+)$", re.I)
 # The synthesis usually puts each field on its own line, but not always: a
 # thinking-mode run wrote "Concern: X. Severity: Substantive. Evidence: ..."
 # on one line, and the action table then carried the whole paragraph as the
@@ -10511,12 +10514,29 @@ def concern_confidence(
                         "table value supports it directly")
 
 
+def authenticatable_quotes(text):
+    """The same original-item quotation set for appraisal, cards and appendices."""
+    quotes = list(dict.fromkeys(_quoted_spans(text or '') + _short_quoted_spans(text or '')))
+    return [q.strip() for q in quotes if len(q.split()) >= 4 or re.search(r'\d', q)]
+
+def quotation_authentication_line(group_text, source_text):
+    """Wording authentication only; never a grade of a finding's validity."""
+    sources = source_text if isinstance(source_text, dict) else {"manuscript": source_text}
+    quotes = authenticatable_quotes(group_text)
+    if not quotes:
+        state = "No quotation offered for authentication"
+    elif all(quotation_sources(q, sources) for q in quotes):
+        state = "Exact quotation authenticated"
+    else:
+        state = "Not every quotation is authenticated; inspect the Evidence Card"
+    return "* Quotation authentication: " + state + ". Wording/location only; evidential support and methodological correctness require human judgement."
+
 def annotate_concern_confidence(
     report_text: str,
     source_text: str | Dict[str, str],
     table_text: str = "",
 ) -> str:
-    """Recompute an application-owned Evidence match line for every concern."""
+    """Recompute authentication-only labels; retain this API name for compatibility."""
     lines = (report_text or "").splitlines()
     bounds = None
     for index, line in enumerate(lines):
@@ -10540,20 +10560,15 @@ def annotate_concern_confidence(
     covered = groups[0][0]
     out.extend(body[:covered])
     label_re = re.compile(
-        r"^\s*[-*]?\s*\**\s*(?:Confidence|Evidence\s+match):?\**\s*:",
+        r"^\s*[-*]?\s*\**\s*(?:Confidence|Evidence\s+match|Quotation\s+authentication):?\**\s*:",
         re.I,
     )
     for begin, end in groups:
-        chunk = [
-            line for line in body[begin:end]
-            if not label_re.match(line)
-        ]
-        level, reason = concern_confidence(
-            "\n".join(chunk), source_text, table_text
-        )
+        chunk = [line for line in body[begin:end]
+                 if not label_re.match(line) and not line.startswith("* Authentication establishes wording only") ]
         while chunk and not chunk[-1].strip():
             chunk.pop()
-        chunk.append(f"* Evidence match: {level} — {reason}.")
+        chunk.append(quotation_authentication_line("\n".join(chunk), source_text))
         chunk.append("")
         out.extend(chunk)
     return "\n".join(lines[:start] + out + lines[stop:])
@@ -10841,35 +10856,14 @@ _ELLIPSIS_RE = re.compile(r"\s*(?:\.\s?\.\s?\.|\u2026)\s*")
 
 def _fragment_located(fragment: str, hay: str, hay_punct: str,
                       hay_nospace: str) -> bool:
-    """One contiguous fragment, tried at three levels of tolerance."""
-    needle = _normalise_for_match(fragment)
-    if not needle:
-        return True
-    if needle in hay:
-        return True
-    stripped = _strip_punctuation(needle)
-    if stripped and stripped in hay_punct:
-        return True
-    return bool(stripped) and re.sub(r"\s+", "", stripped) in hay_nospace
+    """Compatibility wrapper: punctuation/space-stripped inputs are never evidence."""
+    return bool(quotation_sources(fragment, {"manuscript": hay}))
 
 
 def _missing_fragment(quoted: str, hay: str, hay_punct: str,
                       hay_nospace: str) -> Optional[str]:
-    """
-    The first part of a quotation that is not in the source, or None.
-
-    A quotation may legitimately elide with "...". Requiring the whole span to
-    be contiguous reported such a quotation as absent even when both halves
-    were faithful, and -- worse -- said nothing about which half was invented.
-    Each fragment is checked separately, and the one that fails is named.
-    """
-    fragments = [f.strip() for f in _ELLIPSIS_RE.split(quoted) if f.strip()]
-    for fragment in fragments:
-        if len(fragment.split()) < 3 and len(fragments) > 1:
-            continue  # too short to locate meaningfully on its own
-        if not _fragment_located(fragment, hay, hay_punct, hay_nospace):
-            return fragment
-    return None
+    """Authenticate the entire quotation, never independently joined fragments."""
+    return None if _fragment_located(quoted, hay, hay_punct, hay_nospace) else quoted
 
 
 def named_source_text(sources: Dict[str, str]) -> str:
@@ -10878,14 +10872,12 @@ def named_source_text(sources: Dict[str, str]) -> str:
 
 
 def quotation_sources(quote: str, sources: Dict[str, str]) -> List[str]:
-    """A quotation must resolve within one source, including all elided parts."""
-    found = []
-    for name, body in sources.items():
-        hay = _normalise_for_match(body)
-        punct = _strip_punctuation(hay)
-        if _missing_fragment(quote, hay, punct, re.sub(r"\s+", "", punct)) is None:
-            found.append(name)
-    return found
+    """Shared token-preserving authentication; location is not evidential support."""
+    import quote_match as qm
+    result = qm.classify(quote, qm.Manuscript(sources))
+    if result.state != qm.EXACT:
+        return []
+    return list(dict.fromkeys(location.source for location in result.locations))
 
 
 def format_quote_sources(report: str, sources: Dict[str, str]) -> str:
@@ -10933,9 +10925,7 @@ def verify_report_citations(report_text: str, source_text: str | Dict[str, str])
             continue
         # Tolerances live in _missing_fragment: punctuation, spacing (extraction
         # splits "strati fied" and fuses "i tw a sW C"), and elision with "...".
-        missing = ((None if quotation_sources(quoted, sources) else quoted)
-                   if sources is not None else
-                   _missing_fragment(quoted, haystack, haystack_punct, haystack_nospace))
+        missing = None if quotation_sources(quoted, sources if sources is not None else {"manuscript": source_text}) else quoted
         if missing is None:
             continue
         if missing.strip() != quoted.strip():

@@ -29,3 +29,17 @@ model responses are hand-authored, not results of model inference. Fictional
 values test formatting and program flow; they do not validate methodological
 interpretation or model accuracy. The public suite does not contain a private
 exclusion register or source-comparison records.
+
+## v0.1.1 maintenance regressions
+
+`test_chunk_token_allowance.py` intercepts production request construction and
+recovery using invented ceramic-specimen text; no inference or server is used.
+`test_maintenance_identity_quotes.py` uses invented checkpoint paths, protocol
+replies, quotations and numerical values. It checks authentication, offsets,
+numbered findings, provenance and fail-closed checkpoint checks. These tests
+do not validate methodological interpretations.
+
+Service-process tests pin `LLAMA_SERVER_BIN` to their temporary fake executable.
+The fake accepts only fixture-directory placeholder bytes, records its own
+execution and never parses or loads model weights. Tests reject attempts to
+substitute another executable before starting the service script.

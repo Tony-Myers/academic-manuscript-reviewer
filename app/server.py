@@ -48,6 +48,7 @@ import review_pipeline as rp
 import design_expectations as de  # noqa: E402
 import reviewer_notes as notes  # noqa: E402  standard library only, no model
 import llm_backend  # noqa: E402
+import model_identity as mi
 import model_server as ms  # noqa: E402  connection status and model switching
 import evidence_availability as ea  # host-owned sidecar, never report prose
 import source_verification as sv  # one source-grounded check after the merge
@@ -399,6 +400,27 @@ MODEL_ALIAS_MAP.update({
     for choice in MODEL_CHOICES
     for key in [choice["id"], *choice["aliases"]]
 })
+
+
+def _identity_checked_model():
+    return model if isinstance(model, llm_backend.LlamaServerModel) else None
+
+
+def _expected_model_for_review(explicit: str = "") -> dict:
+    external = ms.connection_mode(MODEL_NAME) == ms.MODE_EXTERNAL
+    value = resolve_model_choice(explicit.strip()) if explicit and explicit.strip() else ""
+    handle = _identity_checked_model()
+    reported = mi.server_identity(handle.base_url if handle is not None else ms.server_url()) if external and not value else None
+    return mi.expected_for_review(value, "", MODEL_NAME, external, reported)
+
+
+def _creation_identity_check(explicit: str = ""):
+    expected = _expected_model_for_review(explicit)
+    handle = _identity_checked_model()
+    if handle is None:
+        return expected, None
+    check = mi.creation_check(expected, mi.server_identity(handle.base_url))
+    return expected, check if check["code"] else None
 
 
 def _model_header_lines() -> list:
@@ -1379,10 +1401,15 @@ async def start_review(
     vision: str = Form(""),
     development_mode: str = Form(""),
     supplements: list[UploadFile] | None = File(None),
+    expected_model: str = Form(""),
 ):
     if model_switch.busy():
         raise HTTPException(status_code=409, detail=(
             "A model is loading. Start the review when the status shows it loaded."))
+    expected_model = expected_model if isinstance(expected_model, str) else ""
+    expected_identity, refusal = await asyncio.to_thread(_creation_identity_check, expected_model)
+    if refusal is not None:
+        return JSONResponse(status_code=409, content={"detail": refusal["message"], "model_identity": refusal})
     # Direct Python callers omit the optional FastAPI File parameter.
     supplements = supplements if isinstance(supplements, list) else []
     uploads = [file, *supplements]
@@ -1475,6 +1502,8 @@ async def start_review(
             {"path": str(path), "name": Path((upload.filename or path.name).replace("\\", "/")).name}
             for path, upload in zip(paths[1:], supplements)
         ],
+        "expected_model_request": expected_model.strip(),
+        "expected_model_identity": expected_identity,
         "cancel_requested": False,
     }
 
@@ -1810,11 +1839,23 @@ def _vision_capability_safe() -> dict:
 def _run_review(job_id: str, file_path: Path, domain: str, tmp_dir: Path):
     """Run the full review pipeline (called in background thread)."""
     _record_input_digests(job_id, file_path)
+    identity_guard = None
     try:
         ensure_model()
 
         execution = _review_execution_configuration(review_jobs.get(job_id, {}))
         review_jobs[job_id]["execution"] = execution
+        handle = _identity_checked_model()
+        if handle is not None:
+            job = review_jobs.get(job_id, {})
+            expected = job.get("expected_model_identity") or _expected_model_for_review(job.get("expected_model_request", ""))
+            identity_guard = mi.IdentityGuard(expected.get("identity"), expected.get("source") or "", handle.base_url)
+            try:
+                identity_guard.verify_before_inference()
+            finally:
+                execution["model_identity"] = identity_guard.summary()
+        else:
+            execution["model_identity"] = {"state": "not applicable", "reason": "in-process backend uses the loaded model"}
         ea.execution("appraisal_policy", execution["appraisal_policy"])
         ea.execution("requested", execution["requested"])
         ea.execution("resolved", execution["resolved"])
@@ -1845,8 +1886,15 @@ def _run_review(job_id: str, file_path: Path, domain: str, tmp_dir: Path):
             rp.vision(want_vision),
             llm_backend.inference_cancellation(review_cancelled),
             rp.vision_usage(vision_record["usage"]),
+            llm_backend.identity_guard(identity_guard),
         ):
             _run_review_inner(job_id, file_path, domain, tmp_dir)
+    except mi.ModelIdentityError as e:
+        if job_id in review_jobs:
+            review_jobs[job_id]["status"] = "error"
+            review_jobs[job_id]["error"] = str(e)
+            review_jobs[job_id]["model_identity_error"] = {"code": e.code, "message": str(e)}
+            _add_progress(job_id, f"Stopped: {e}")
     except llm_backend.InferenceCancelledError:
         if job_id in review_jobs:
             review_jobs[job_id]["status"] = "cancelled"
@@ -1865,6 +1913,8 @@ def _run_review(job_id: str, file_path: Path, domain: str, tmp_dir: Path):
         model_switch.release(REVIEW_OPERATION)
         if job_id in review_jobs:
             execution = review_jobs[job_id].get("execution")
+            if execution is not None and identity_guard is not None:
+                execution["model_identity"] = identity_guard.summary()
             if execution is not None:
                 execution["actual"].update(llm_backend.reasoning_stats())
                 execution["actual"]["text_generations"] = llm_backend.reasoning_stats()["generations"]
@@ -2447,7 +2497,7 @@ def _run_review_inner(job_id: str, file_path: Path, domain: str, tmp_dir: Path):
                 _source_verification_assessor(verification_raw),
                 automated_flags=list(dict.fromkeys(all_corrections)),
                 primary_source=source_name if supplementary else "",
-                passthrough=(ReviewCancelled, llm_backend.InferenceCancelledError),
+                passthrough=(ReviewCancelled, llm_backend.InferenceCancelledError, mi.ModelIdentityError),
                 retry_on=(academic_claim_assessor.ClaimAssessorOutputError,),
             )
             final_report = verification.report
@@ -2606,8 +2656,16 @@ def _run_review_inner(job_id: str, file_path: Path, domain: str, tmp_dir: Path):
         except Exception as exc:  # Diagnostics must never change review completion.
             review_jobs[job_id]["synthesis_concern_accounting_error"] = str(exc)
             print(f"[synthesis-accounting] diagnostic unavailable for {job_id}: {exc}", flush=True)
+        llm_backend.raise_if_identity_compromised()
         review_jobs[job_id]["status"] = "complete"
         _add_progress(job_id, "Review complete.")
+
+    except mi.ModelIdentityError as e:
+        if job_id in review_jobs:
+            review_jobs[job_id]["status"] = "error"
+            review_jobs[job_id]["error"] = str(e)
+            review_jobs[job_id]["model_identity_error"] = {"code": e.code, "message": str(e)}
+            _add_progress(job_id, f"Stopped: {e}")
 
     except (ReviewCancelled, llm_backend.InferenceCancelledError):
         review_jobs[job_id]["status"] = "cancelled"

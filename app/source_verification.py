@@ -44,6 +44,8 @@ What it cannot do, stated so nobody relies on it for these:
 """
 from __future__ import annotations
 
+from model_identity import ModelIdentityError
+
 import os
 import re
 from dataclasses import dataclass, field
@@ -94,6 +96,8 @@ MAX_ITEMS = 30
 
 _STRENGTH_RE = re.compile(r"^\s*[-*]?\s*\**\s*Strength\**\s*:", re.I)
 _BULLET_RE = re.compile(r"^\s*[-*]\s+\S")
+_NUMBER_PREFIX = re.compile(r"^\s{0,3}\**\d{1,2}[.)]\**\s+")
+_NUMBERED_RE = re.compile(r"^\s{0,3}\**\d{1,2}[.)]\**\s+\S")
 _SECTIONS = (
     ("major strengths", "strength", "S", _STRENGTH_RE),
     ("directly supported concerns", "concern", "C", rp._CONCERN_RE),
@@ -113,6 +117,7 @@ class Item:
     @property
     def title(self) -> str:
         first = self.text.splitlines()[0] if self.text else ""
+        first = _NUMBER_PREFIX.sub("", first, 1)
         first = re.sub(r"^\s*[-*]?\s*\**\s*(?:Strength|Concern|Check)\**\s*:\**\s*", "", first, flags=re.I)
         first = re.split(r"\s*\**\s*(?:Evidence|Reason|Why it matters|Severity)\s*\**\s*:", first)[0]
         first = first.strip(" *")
@@ -142,10 +147,11 @@ def extract_items(report_text: str) -> List[Item]:
         if not bounds:
             continue
         start, stop = bounds
-        starts = [i for i in range(start, stop) if marker.match(lines[i])]
+        starts = [i for i in range(start, stop) if marker.match(_NUMBER_PREFIX.sub("", lines[i], 1))]
         if not starts and kind == "strength":
             # Strengths are sometimes plain bullets with no "Strength:" label.
-            starts = [i for i in range(start, stop) if _BULLET_RE.match(lines[i])]
+            starts = ([i for i in range(start, stop) if _BULLET_RE.match(lines[i])]
+                      or [i for i in range(start, stop) if _NUMBERED_RE.match(lines[i])])
         for n, begin in enumerate(starts):
             end = starts[n + 1] if n + 1 < len(starts) else stop
             while end > begin + 1 and not lines[end - 1].strip():
@@ -509,26 +515,8 @@ _NON_CONTIGUOUS = re.compile(r"\.\s*\.\s*\.|\u2026|\[[^\]]*\]|\(\s*\.\.\.?\s*\)|
 
 
 def _located(quote: str, sources: Dict[str, str]) -> List[str]:
-    """Sources containing the quotation as ONE contiguous passage.
-
-    Whitespace, line breaks, quote styles, dashes and punctuation are folded
-    (extraction varies them), but nothing may be omitted: no ellipses, no
-    bracketed insertions, and the whole quotation must occur in one place.
-    rp.quotation_sources is deliberately not used here, because it accepts
-    ellipses and checks each fragment separately."""
-    quote = (quote or "").strip().strip('"\u201c\u201d\u00ab\u00bb').strip()
-    if len(quote.split()) < MIN_QUOTE_WORDS or _NON_CONTIGUOUS.search(quote):
-        return []
-    needle = rp._normalise_for_match(quote)
-    stripped = rp._strip_punctuation(needle)
-    found = []
-    for name, body in sources.items():
-        hay = rp._normalise_for_match(body)
-        punct = rp._strip_punctuation(hay)
-        if needle in hay or (stripped and stripped in punct) or \
-                (stripped and re.sub(r"\s+", "", stripped) in re.sub(r"\s+", "", punct)):
-            found.append(name)
-    return found
+    """Use the same conservative quotation authentication as every presentation."""
+    return rp.quotation_sources(quote, sources)
 
 
 # Field labels appear in every item, so they would make any two items look alike.
@@ -877,6 +865,8 @@ def verify_report(report_text: str, sources: Dict[str, str],
         allowance = max_tokens if attempt == 0 else _retry_allowance(max_tokens, prompt)
         try:
             raw = assessor(prompt=prompt, schema=schema, max_tokens=allowance)
+        except ModelIdentityError:
+            raise
         except tuple(passthrough):
             raise
         except tuple(retry_on) as exc:

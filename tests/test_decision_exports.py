@@ -94,7 +94,7 @@ class ConciseExport(unittest.TestCase):
         full = dr.render_markdown(self.cards, DECISIONS, META)
         for absent in ('A reference tile was rescanned before every batch',  # manuscript quotation
                        'Detailed verification record', '"label"', 'Verifier', 'What still needs checking',
-                       'Evidence not confirmed', '<details>'):
+                       'Relevant manuscript passage located', '<details>'):
             self.assertNotIn(absent, self.md, absent)
             self.assertIn(absent, full, absent)  # still available in the audit record
         self.assertLess(len(self.md.splitlines()) * 5, len(full.splitlines()))

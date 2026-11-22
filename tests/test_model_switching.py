@@ -519,6 +519,15 @@ FAKE_LLAMA_SERVER = r'''#!/usr/bin/env python3
 import http.server, json, os, sys
 args = sys.argv[1:]
 model, host, port = (args[args.index(flag) + 1] for flag in ('--model', '--host', '--port'))
+# This executable is a fixture only: refuse paths outside the fixture directory
+# and never parse/load a model checkpoint.
+if os.path.dirname(os.path.realpath(model)) != os.path.realpath(os.environ['FAKE_MODEL_ROOT']):
+    raise SystemExit('Refusing non-fixture model path')
+with open(model, 'rb') as fixture:
+    if fixture.read(64) != b'GGUF placeholder':
+        raise SystemExit('Refusing non-placeholder model bytes')
+with open(os.environ['FAKE_LLAMA_RECORD'], 'a') as record:
+    record.write(json.dumps({'executable': os.path.realpath(__file__), 'model': model}) + '\n')
 if 'broken' in os.path.basename(model):
     print("fixture: unknown model architecture: 'fixturearch'", flush=True)
     sys.exit(1)
@@ -561,6 +570,8 @@ class ServiceProcessSafety(unittest.TestCase):
         fake = bin_dir / 'llama-server'
         fake.write_text(FAKE_LLAMA_SERVER)
         fake.chmod(0o755)
+        self.fake_executable = fake.resolve()
+        self.fake_record = self.root / "fake-invocations.jsonl"
         self.models = self.root / 'models'
         self.models.mkdir()
         for name in ('alpha-synthetic.gguf', 'beta-synthetic.gguf', 'broken-synthetic.gguf'):
@@ -571,6 +582,8 @@ class ServiceProcessSafety(unittest.TestCase):
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(('LLAMA_', 'QWEN_'))}
         self.env.update(PATH=f'{bin_dir}{os.pathsep}{os.environ.get("PATH", "")}',
                         HOME=str(self.root), LLAMA_SERVER_MODE='managed',
+                        LLAMA_SERVER_BIN=str(self.fake_executable),
+                        FAKE_LLAMA_RECORD=str(self.fake_record), FAKE_MODEL_ROOT=str(self.models),
                         LLAMA_SERVER_HOST='127.0.0.1', LLAMA_SERVER_PORT=str(self.port),
                         QWEN_STARTUP_TIMEOUT='30', QWEN_LOAD_MMPROJ='0')
         self.others = []
@@ -597,6 +610,9 @@ class ServiceProcessSafety(unittest.TestCase):
         return bool(state) and not state.startswith('Z')
 
     def switch(self, model, **env):
+        chosen = {**self.env, **env}.get('LLAMA_SERVER_BIN', '')
+        self.assertEqual(Path(chosen).resolve(), self.fake_executable, 'Only the temporary fake executable is allowed')
+        self.assertEqual(self.fake_executable.read_text(), FAKE_LLAMA_SERVER)
         run = subprocess.run(['bash', str(self.service), 'switch-model', '--model', str(self.models / model)],
                              env={**self.env, **env}, capture_output=True, text=True, timeout=90)
         return run.returncode, run.stdout + run.stderr
@@ -609,6 +625,22 @@ class ServiceProcessSafety(unittest.TestCase):
     def listening(self):
         return subprocess.run(['curl', '-s', '-o', '/dev/null', '-m', '2', f'http://127.0.0.1:{self.port}/'],
                               capture_output=True).returncode == 0
+
+    def test_installed_binary_override_is_refused_before_any_process_starts(self):
+        from unittest.mock import patch
+        with patch('subprocess.run') as run:
+            with self.assertRaises(AssertionError):
+                self.switch('alpha-synthetic.gguf', LLAMA_SERVER_BIN='/forbidden/real-server')
+            run.assert_not_called()
+
+    def test_fake_executable_is_pinned_independently_of_path(self):
+        code, out = self.switch('alpha-synthetic.gguf')
+        self.assertEqual(code, 0, out)
+        entries = [json.loads(line) for line in self.fake_record.read_text().splitlines()]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]['executable'], str(self.fake_executable))
+        self.assertEqual(Path(entries[0]['model']).parent, self.models)
+        self.assertIn('llama-server binary: ' + str(self.fake_executable), out)
 
     def test_managed_switch_replaces_only_its_own_server(self):
         code, out = self.switch('alpha-synthetic.gguf')

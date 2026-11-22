@@ -104,7 +104,8 @@ class PrintPageEndpoints(Isolated):
                         'B. Additional observations from the initial reading (not independently verified)'):
             self.assertIn(f'<h3>{heading}</h3>', body)
         self.assertIn('Exact quotation authenticated', body)
-        self.assertIn('The Evidence Card does not list this quotation as located', body)
+        self.assertNotIn('The Evidence Card does not list this quotation as located', body)
+        self.assertIn('not that the AI&#x27;s reading of it is correct', body)
         self.assertEqual(tab.split('## A.')[1].split('## C. ')[0].count('> Every tile was scanned twice.'),
                          body.count('<blockquote>Every tile was scanned twice.</blockquote>'))
         self.assertIn('<blockquote>Every tile was scanned twice.</blockquote>', body)
